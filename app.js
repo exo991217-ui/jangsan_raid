@@ -199,6 +199,7 @@ function loadState(){
         S._migrated_v2=true;
       } else {S=DEFAULT_DATA();S._migrated_v2=true;}
     }
+    if(migrateNetWorthSnapshots())saveState();
   } catch(e){S=DEFAULT_DATA();S._migrated_v2=true;}
 }
 
@@ -264,6 +265,7 @@ window.FB_MERGE = function(fbData) {
     if(S.fundCalc.assetLinked===undefined)S.fundCalc.assetLinked=false;
     if(S.fundCalc.assetLinkedAt===undefined)S.fundCalc.assetLinkedAt=null;
     if(!S.fundCalc.linkedAssetIds)S.fundCalc.linkedAssetIds=[];
+    if(migrateNetWorthSnapshots())saveState();
   } catch(e) { console.error('[FB_MERGE] 오류:', e); }
 };
 
@@ -500,6 +502,34 @@ function getTotalStockValue(){return S.stocks.reduce((s,st)=>{
   if(st.stockType==='foreign'||st.stockType==='gold')return s+(parseFloat(st.currentAmount)||0);
   return s+(parseFloat(st.currentPrice)||0)*(parseFloat(st.quantity)||0);
 },0);}
+// 순자산의 단일 기준: 자산 목록에 표시되는 실제 자산 합계.
+// 주식은 이미 `주식 매입금액(자동)` 자산으로 포함되므로
+// getTotalStockValue()를 여기에 다시 더하면 주식이 중복 집계된다.
+function getNetWorth(){return getTotalAssets();}
+
+// 기존 버전은 자산 합계에 주식 평가액을 한 번 더해 마감 순자산을 저장했다.
+// 현재 데이터가 그 legacy 계산식과 정확히 일치할 때만 기존 기록을 안전하게 보정한다.
+function migrateNetWorthSnapshots(){
+  const assetTotal=getTotalAssets();
+  const stockValue=getTotalStockValue();
+  const legacyTotal=assetTotal+stockValue;
+  let changed=false;
+  ['monthClosedArchive','closedMonths'].forEach(collection=>{
+    Object.values(S[collection]||{}).forEach(record=>{
+      if(!record||record.netWorth===undefined||record.netWorthVersion===2)return;
+      if(Math.round(Number(record.netWorth)||0)!==Math.round(legacyTotal))return;
+      record.netWorth=assetTotal;
+      record.assetTotal=assetTotal;
+      record.netWorthVersion=2;
+      changed=true;
+    });
+  });
+  return changed;
+}
+function getArchiveNetWorth(record){
+  const value=record?.assetTotal??record?.netWorth;
+  return Number(value)||0;
+}
 function getTotalStockCost(){return S.stocks.reduce((s,st)=>{
   if(st.stockType==='foreign'||st.stockType==='gold')return s+(parseFloat(st.buyAmount)||0);
   return s+(parseFloat(st.buyPrice)||0)*(parseFloat(st.quantity)||0);
@@ -4834,12 +4864,14 @@ function closeMonth(){
   const note=document.getElementById('cm-note').value;
   const ledIn=entries.filter(e=>e.type==='income').reduce((s,e)=>s+e.amount,0);
   const ledOut=entries.filter(e=>e.type==='expense').reduce((s,e)=>s+e.amount,0);
-  const netWorth=getTotalAssets()+getTotalStockValue();
+  const assetTotal=getTotalAssets();
+  const netWorth=getNetWorth();
   const snapshot={
     closedAt:Date.now(),note,
     year:cm.y,month:cm.m,
     ledgerIncome:ledIn,ledgerExpense:ledOut,
-    budgetIncome:budIn,budgetExpense:budOut,savings,savingsRate:sr,netWorth,
+    budgetIncome:budIn,budgetExpense:budOut,savings,savingsRate:sr,
+    assetTotal,netWorth,netWorthVersion:2,
     categories:(()=>{
       const effectiveVars=getEffectiveVariable(cm.y,cm.m);
       const catMap={};
@@ -4855,7 +4887,7 @@ function closeMonth(){
     })(),
     ledgerEntries:entries.map(e=>({...e})),
   };
-  S.closedMonths[key]={closedAt:snapshot.closedAt,note,ledgerIncome:ledIn,ledgerExpense:ledOut,budgetIncome:budIn,budgetExpense:budOut,savings,savingsRate:sr,netWorth};
+  S.closedMonths[key]={closedAt:snapshot.closedAt,note,ledgerIncome:ledIn,ledgerExpense:ledOut,budgetIncome:budIn,budgetExpense:budOut,savings,savingsRate:sr,assetTotal,netWorth,netWorthVersion:2};
   S.monthClosedArchive[key]=snapshot;
   saveState();closeModal();renderLedger();
 }
@@ -4885,11 +4917,13 @@ function closeMonthDirect(y,m){
   const sr=budIn>0?parseFloat((savings/budIn*100).toFixed(1)):0;
   const ledIn=entries.filter(e=>e.type==='income').reduce((s,e)=>s+e.amount,0);
   const ledOut=entries.filter(e=>e.type==='expense').reduce((s,e)=>s+e.amount,0);
-  const netWorth=getTotalAssets()+getTotalStockValue();
+  const assetTotal=getTotalAssets();
+  const netWorth=getNetWorth();
   const snapshot={
     closedAt:Date.now(),note,year:y,month:m,
     ledgerIncome:ledIn,ledgerExpense:ledOut,
-    budgetIncome:budIn,budgetExpense:budOut,savings,savingsRate:sr,netWorth,
+    budgetIncome:budIn,budgetExpense:budOut,savings,savingsRate:sr,
+    assetTotal,netWorth,netWorthVersion:2,
     categories:(()=>{
       const effectiveVars=getEffectiveVariable(y,m);
       const catMap={};
@@ -4901,7 +4935,7 @@ function closeMonthDirect(y,m){
     })(),
     ledgerEntries:entries.map(e=>({...e})),
   };
-  S.closedMonths[key]={closedAt:snapshot.closedAt,note,ledgerIncome:ledIn,ledgerExpense:ledOut,budgetIncome:budIn,budgetExpense:budOut,savings,savingsRate:sr,netWorth};
+  S.closedMonths[key]={closedAt:snapshot.closedAt,note,ledgerIncome:ledIn,ledgerExpense:ledOut,budgetIncome:budIn,budgetExpense:budOut,savings,savingsRate:sr,assetTotal,netWorth,netWorthVersion:2};
   S.monthClosedArchive[key]=snapshot;
   saveState();
   renderAnalysis();
@@ -7290,7 +7324,7 @@ function renderArchive(){
   const totNetChange=totIncome-totExpense;
   const netPct=totIncome>0?(totNetChange/totIncome*100).toFixed(1):0;
   // 가장 최근 마감 월의 순자산 (archived는 내림차순 정렬이므로 [0]이 가장 최근)
-  const lastNetWorth=(archived[0]&&archived[0][1])?archived[0][1].netWorth||0:0;
+  const lastNetWorth=archived[0]?getArchiveNetWorth(archived[0][1]):0;
   const lastNetWorthColor=lastNetWorth>=0?'#4CAF82':'#F06292';
   const lastNetWorthY=archived[0]?archived[0][1].year||archived[0][0].split('-')[0]:'';
   const lastNetWorthM=archived[0]?archived[0][1].month||archived[0][0].split('-')[1]:'';
@@ -7313,7 +7347,8 @@ function renderArchive(){
     ${card(`최근 마감 월 순자산 (${lastNetWorthY}년 ${lastNetWorthM}월)`,fmt(lastNetWorth),lastNetWorthColor,'')}
   </div>`;
   const rowsHtml=archived.map(([key,data])=>{
-    const{year:y,month:mo,ledgerIncome:income,ledgerExpense:expense,savings,savingsRate,note,categories,netWorth}=data;
+    const{year:y,month:mo,ledgerIncome:income,ledgerExpense:expense,savings,savingsRate,note,categories}=data;
+    const netWorth=getArchiveNetWorth(data);
     const isOpen=(_archExpandedKey===key);
     const srNum=parseFloat(savingsRate)||0;
     const rateColor=srNum>=50?'#4CAF82':srNum>=30?'#FFB347':'#F06292';
